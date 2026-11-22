@@ -1,0 +1,25 @@
+/target/
+/dist/
+/.DS_Store
+*.log
+
+
+# Third-party firmware images kept locally for interoperability research.
+# They are proprietary and must never be committed or redistributed.
+/antminer-*/
+/antminer-*.tar.gz
+/vendor-fw/
+/braiins/
+/HashcoreToolkit-*
+# Vendor firmware, recovery packages and third-party tools stay out of the repository.
+*.img
+*.bmu
+*.dmg
+*.tar
+*.tar.gz
+*.zip
+/archiv/
+/oldFW/
+/recover/
+/braiins/
+.DS_Store

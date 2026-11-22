@@ -1,0 +1,111 @@
+#!/bin/sh
+# Writes boot diagnostics to the SD card, so a test without a serial console
+# or a working network still leaves a record. Take the card out afterwards
+# and read omo-logs/boot-N/ on a computer.
+#
+# Towards the hardware it only reads. It never writes NAND, GPIO or FPGA
+# registers. The FPGA probe runs only when the bitstream is loaded, because
+# a read from an unconfigured PL stalls the bus and freezes the board.
+# Create omo-no-probe on the card to skip the probe.
+
+dev=/dev/mmcblk0p1
+mnt=/mnt/sd
+fallback_ip=192.168.2.241/24
+
+i=0
+while [ ! -b "$dev" ] && [ "$i" -lt 30 ]; do
+	sleep 1
+	i=$((i + 1))
+done
+if [ ! -b "$dev" ]; then
+	echo "omo-sdlog: $dev not found, no log on the card"
+	exit 0
+fi
+mkdir -p "$mnt"
+if ! mount -t vfat -o rw,noatime "$dev" "$mnt"; then
+	echo "omo-sdlog: cannot mount $dev, no log on the card"
+	exit 0
+fi
+
+n=1
+while [ -e "$mnt/omo-logs/boot-$n" ]; do
+	n=$((n + 1))
+done
+out="$mnt/omo-logs/boot-$n"
+mkdir -p "$out"
+echo "omo-sdlog: writing to $out"
+
+{
+	echo "== uname"; uname -a
+	echo "== cmdline"; cat /proc/cmdline
+	echo "== firmware"; cat /etc/openmineros/fw-info.json
+	echo "== cpuinfo"; cat /proc/cpuinfo
+	echo "== meminfo"; cat /proc/meminfo
+	echo "== mtd"; cat /proc/mtd
+	echo "== iomem"; cat /proc/iomem
+	echo "== interrupts"; cat /proc/interrupts
+	echo "== net"; ls /sys/class/net
+	echo "== uio"; for u in /sys/class/uio/*; do [ -e "$u/name" ] && echo "$u $(cat "$u/name")"; done
+	echo "== dev"; ls -l /dev
+} > "$out/system.txt" 2>&1
+sync
+
+snapshot() {
+	{
+		echo "== $(date) uptime $(cat /proc/uptime)"
+		ip addr
+		ip route
+		cat /tmp/resolv.conf 2>/dev/null
+		echo "-- health"
+		wget -q -T 3 -O - http://127.0.0.1/api/v1/system/health 2>&1
+		echo
+	} >> "$out/status.log" 2>&1
+	dmesg > "$out/dmesg.txt" 2>&1
+	ps > "$out/ps.txt" 2>&1
+	sync
+}
+
+# Without a DHCP lease the board stays unreachable; a fixed address makes
+# it findable from a laptop on the same network.
+ensure_address() {
+	if ! ip addr show dev eth0 2>/dev/null | grep -q ' inet '; then
+		ip addr add "$fallback_ip" dev eth0 2>/dev/null &&
+			echo "$(date) no DHCP lease, added $fallback_ip" >> "$out/status.log"
+	fi
+}
+
+probe_fpga() {
+	f="$out/fpga.txt"
+	done_flag="$(cat /sys/bus/platform/devices/f8007000.*/prog_done 2>/dev/null)"
+	echo "prog_done=${done_flag:-unknown}" > "$f"
+	if [ -e "$mnt/omo-no-probe" ]; then
+		echo "omo-no-probe present, probe skipped" >> "$f"
+	elif [ "$done_flag" != 1 ]; then
+		echo "FPGA not configured, probe skipped" >> "$f"
+	else
+		for base in 0x40000000 0x43C00000; do
+			# Synced before each run: if a read stalls the bus, the
+			# card still shows which base it was.
+			echo "== omo-fpga-probe --raw $base" >> "$f"
+			sync
+			omo-fpga-probe --raw "$base" >> "$f" 2>&1
+			echo "exit $?" >> "$f"
+			sync
+		done
+	fi
+	sync
+}
+
+# One minute of network and API state first, so a probe that freezes the
+# board cannot hide it.
+for i in 1 2 3 4 5 6; do
+	snapshot
+	[ "$i" -eq 3 ] && ensure_address
+	sleep 10
+done
+probe_fpga
+while :; do
+	ensure_address
+	snapshot
+	sleep 30
+done

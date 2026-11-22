@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OpenMinerOS</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f141c; --panel: #18202b; --panel2: #1f2936; --line: #2d3a4a;
+    --text: #eef2f7; --muted: #93a1b3; --accent: #f7931a; --ok: #34c77b; --warn: #f2b33d; --bad: #ef5b5b;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header h1 span { color: var(--accent); }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 13px; background: var(--panel2); border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); } .pill.warn { color: var(--warn); border-color: var(--warn); } .pill.bad { color: var(--bad); border-color: var(--bad); }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button { background: none; border: 0; color: var(--muted); padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  nav button.on { color: var(--text); background: var(--panel2); }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; }
+  section { display: none; } section.on { display: block; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .label { color: var(--muted); font-size: 13px; }
+  .big { font-size: 28px; font-weight: 650; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .big small { font-size: 14px; color: var(--muted); font-weight: 400; }
+  h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 10px; text-transform: uppercase; letter-spacing: .04em; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; }
+  label.f { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 13px; }
+  input, select { width: 100%; background: var(--panel2); border: 1px solid var(--line); color: var(--text); padding: 9px 10px; border-radius: 6px; font-size: 14px; }
+  .row { display: grid; grid-template-columns: 2fr 2fr 1fr; gap: 10px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 640px) { .row, .row2 { grid-template-columns: 1fr; } }
+  button.btn { background: var(--accent); color: #111; border: 0; padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; margin-top: 14px; }
+  button.btn.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+  button.btn.danger { background: var(--bad); color: #fff; }
+  .presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .preset { cursor: pointer; } .preset.sel { border-color: var(--accent); }
+  .msg { margin-top: 12px; font-size: 14px; min-height: 18px; }
+  .msg.ok { color: var(--ok); } .msg.bad { color: var(--bad); }
+  pre { background: #0a0e14; border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; max-height: 420px; font-size: 12px; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; background: var(--accent); }
+  .note { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  a.donate { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+  a.donate:hover { background: var(--accent); color: #111; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>⛏</span> OpenMinerOS</h1>
+  <span id="state" class="pill">…</span>
+  <span id="slot" class="pill">…</span>
+  <a class="pill donate" href="https://buymeacoffee.com/cloudpeakify" target="_blank" rel="noopener">🍕 Buy us a pizza</a>
+  <nav>
+    <button data-tab="dash" class="on">Dashboard</button>
+    <button data-tab="pools">Pools</button>
+    <button data-tab="perf">Performance</button>
+    <button data-tab="cool">Cooling</button>
+    <button data-tab="sys">System</button>
+  </nav>
+</header>
+<main>
+  <section id="dash" class="on">
+    <div class="grid">
+      <div class="card"><div class="label">Hashrate (1 min)</div><div class="big" id="hr">–</div></div>
+      <div class="card"><div class="label">Shares accepted / rejected</div><div class="big" id="sh">–</div></div>
+      <div class="card"><div class="label">Best share (all time)</div><div class="big" id="bestall">–</div><div class="note" id="bestnote"></div><div class="bar"><div id="bestbar" style="width:0"></div></div></div>
+      <div class="card"><div class="label">Best share (this run)</div><div class="big" id="best">–</div><div class="note" id="netdiff"></div></div>
+      <div class="card"><div class="label">Blocks found</div><div class="big" id="blocks">0</div></div>
+      <div class="card"><div class="label">Hottest PCB</div><div class="big" id="temp">–</div></div>
+      <div class="card"><div class="label">Fans</div><div class="big" id="fan">–</div><div class="bar"><div id="fanbar" style="width:0"></div></div></div>
+      <div class="card"><div class="label">Clock / voltage</div><div class="big" id="oc">–</div></div>
+      <div class="card"><div class="label">Power (estimate)</div><div class="big" id="pw">–</div><div class="note" id="eff"></div></div>
+      <div class="card"><div class="label">Mining for</div><div class="big" id="up">–</div></div>
+    </div>
+    <h2>Pool</h2>
+    <div class="card"><div id="pool">–</div><div class="note" id="statemsg"></div></div>
+    <h2>Hashboards</h2>
+    <div class="card"><table><thead><tr><th>Board</th><th>Hashrate</th><th>PCB temp</th><th>Valid nonces</th></tr></thead><tbody id="chains"></tbody></table></div>
+  </section>
+
+  <section id="pools">
+    <div class="card">
+      <div class="note">Pools are tried in order; when one fails the miner moves to the next. Use a solo pool (for example your own ckpool) to play for a whole block.</div>
+      <div id="poolrows"></div>
+      <button class="btn" onclick="saveConfig()">Save and restart mining</button>
+      <div class="msg" id="poolmsg"></div>
+    </div>
+  </section>
+
+  <section id="perf">
+    <div class="card">
+      <div class="label">Presets</div>
+      <div class="presets" id="presets" style="margin-top:8px"></div>
+      <div class="row2" style="margin-top:12px">
+        <div><label class="f">Chip clock (MHz)</label><input id="freq" type="number" min="50" max="700" step="1"></div>
+        <div><label class="f">Supply voltage (V)</label><input id="volt" type="number" min="11.96" max="15.14" step="0.01"></div>
+      </div>
+      <div class="note">Presets come from Braiins OS autotuner profiles saved on two S19 units (average chip clock per power target). Power figures are estimates (the PSU does not report power): 74 W + 3.54 W/MHz × clock × (V/11.96)². Hashrate scales with the clock; power scales roughly with clock × voltage². Only “eco” has been measured on this machine. Higher points draw much more power and heat — watch temperatures after changing. The clock is ramped in 25 MHz steps and the voltage is raised before the clock.</div>
+      <button class="btn" onclick="saveConfig()">Apply and restart mining</button>
+      <div class="msg" id="perfmsg"></div>
+    </div>
+  </section>
+
+  <section id="cool">
+    <div class="card">
+      <div class="row2">
+        <div><label class="f">Fan mode</label><select id="fanmode"><option value="auto">Automatic (target temperature)</option><option value="manual">Manual (fixed speed)</option></select></div>
+        <div><label class="f">Target PCB temperature (°C)</label><input id="fantarget" type="number" min="20" max="75"></div>
+        <div><label class="f">Minimum fan speed (%)</label><input id="fanmin" type="number" min="20" max="100"></div>
+        <div><label class="f">Manual fan speed (%)</label><input id="fanmanual" type="number" min="20" max="100"></div>
+        <div><label class="f">Emergency stop above PCB (°C)</label><input id="maxtemp" type="number" min="40" max="90"></div>
+      </div>
+      <button class="btn" onclick="saveConfig()">Save and restart mining</button>
+      <div class="msg" id="coolmsg"></div>
+    </div>
+  </section>
+
+  <section id="sys">
+    <div class="grid">
+      <div class="card"><div class="label">Firmware</div><div id="fw" style="margin-top:6px">–</div></div>
+      <div class="card"><div class="label">Boot slot</div><div id="bootinfo" style="margin-top:6px">–</div></div>
+      <div class="card"><div class="label">System uptime</div><div id="sysup" style="margin-top:6px">–</div></div>
+      <div class="card"><div class="label">Support OpenMinerOS</div><div style="margin-top:6px">OpenMinerOS is free, open source and has no dev fee. If it mines for you, a pizza keeps it going: <a class="donate" href="https://buymeacoffee.com/cloudpeakify" target="_blank" rel="noopener">buymeacoffee.com/cloudpeakify</a></div></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <button class="btn ghost" onclick="post('/api/v1/x19/restart', null, 'sysmsg', 'Mining restarting…')">Restart mining</button>
+      <button class="btn ghost" onclick="if(confirm('Reboot the miner?')) post('/api/v1/x19/reboot', null, 'sysmsg', 'Rebooting in 10 s…')">Reboot</button>
+      <button class="btn" id="keepbtn" onclick="if(confirm('Make OpenMinerOS permanent? A reboot will no longer return to Braiins OS.')) post('/api/v1/x19/boot', {target:'keep'}, 'sysmsg', 'OpenMinerOS is now permanent.')">Keep OpenMinerOS permanently</button>
+      <button class="btn danger" onclick="if(confirm('Boot Braiins OS (slot 1) now?')) post('/api/v1/x19/boot', {target:'braiins'}, 'sysmsg', 'Rebooting into Braiins OS…')">Boot Braiins OS</button>
+      <div class="msg" id="sysmsg"></div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="label">Change password (web UI and telnet, user <b>root</b>)</div>
+      <div class="note" id="pwnote"></div>
+      <div class="row2"><div><label class="f">New password</label><input id="pw1" type="password" autocomplete="new-password"></div>
+      <div><label class="f">Repeat</label><input id="pw2" type="password" autocomplete="new-password"></div></div>
+      <button class="btn" onclick="changePw()">Change password</button>
+      <div class="msg" id="pwmsg"></div>
+    </div>
+    <h2>Miner log</h2>
+    <pre id="log">…</pre>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let cfg = null, presets = [];
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === b.dataset.tab));
+  if (b.dataset.tab === 'sys') loadSys();
+});
+const fmtDur = (s) => { s = Math.floor(s || 0); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + 'd ' : '') + (h ? h + 'h ' : '') + m + 'm'; };
+const fmtDiff = (d) => { if (!d) return '–'; const u = ['', 'k', 'M', 'G', 'T', 'P', 'E']; let i = 0; while (d >= 1000 && i < u.length - 1) { d /= 1000; i++; } return d.toFixed(2) + ' ' + u[i]; };
+async function j(url, opts) { const r = await fetch(url, opts); const t = await r.text(); let v; try { v = JSON.parse(t); } catch { v = t; } if (!r.ok) throw new Error(v.error || t); return v; }
+async function post(url, body, msgId, okText) {
+  const m = $(msgId); m.className = 'msg'; m.textContent = '…';
+  try { const v = await j(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : '{}' }); m.className = 'msg ok'; m.textContent = v.message || okText; loadSys(); }
+  catch (e) { m.className = 'msg bad'; m.textContent = e.message; }
+}
+async function refresh() {
+  try {
+    const s = await j('/api/v1/x19/status');
+    const st = $('state'); st.textContent = s.state || 'unknown';
+    st.className = 'pill ' + ({ mining: 'ok', starting: 'warn', connecting: 'warn', error: 'bad', 'pool-error': 'bad', stopped: 'bad', unconfigured: 'bad' }[s.state] || '');
+    $('statemsg').textContent = s.message || '';
+    $('hr').innerHTML = s.hashrate_ths != null ? s.hashrate_ths.toFixed(2) + ' <small>TH/s</small>' : '–';
+    const sh = s.shares || {}; $('sh').textContent = (sh.accepted ?? 0) + ' / ' + (sh.rejected ?? 0);
+    $('best').textContent = fmtDiff(s.best_share);
+    $('bestall').textContent = fmtDiff(s.best_share_all_time);
+    const nd = s.network_difficulty || 0, pct = nd ? 100 * (s.best_share_all_time || 0) / nd : 0;
+    $('bestnote').textContent = nd ? pct.toPrecision(3) + ' % of a block (network ' + fmtDiff(nd) + ')' : '';
+    $('bestbar').style.width = Math.min(100, Math.max(pct > 0 ? 1 : 0, Math.log10(1 + pct) * 50)) + '%';
+    $('netdiff').textContent = (s.pool_difficulty ? 'pool difficulty ' + fmtDiff(s.pool_difficulty) : '');
+    $('blocks').textContent = s.blocks_found ?? 0;
+    const t = Math.max(...(s.temps_pcb || [0])); $('temp').innerHTML = t ? t.toFixed(1) + ' <small>°C</small>' : '–';
+    $('fan').innerHTML = s.fan_percent != null ? s.fan_percent + ' <small>%</small>' : '–'; $('fanbar').style.width = (s.fan_percent || 0) + '%';
+    $('oc').innerHTML = s.freq_mhz ? s.freq_mhz.toFixed(0) + ' <small>MHz</small> · ' + (s.voltage || 0).toFixed(2) + ' <small>V</small>' : '–';
+    $('pw').innerHTML = s.est_power_w ? s.est_power_w.toFixed(0) + ' <small>W</small>' : '–';
+    $('eff').textContent = (s.est_power_w && s.hashrate_ths) ? (s.est_power_w / s.hashrate_ths).toFixed(1) + ' J/TH' : '';
+    $('up').textContent = s.mining_seconds != null ? fmtDur(s.mining_seconds) : '–';
+    $('pool').textContent = s.pool ? s.pool + ' — ' + (s.user || '') : '–';
+    $('chains').innerHTML = (s.chains || []).map(c => `<tr><td>#${c.chain}</td><td>${c.hashrate_ths.toFixed(2)} TH/s</td><td>${c.pcb_temp ? c.pcb_temp.toFixed(1) + ' °C' : '–'}</td><td>${c.valid}</td></tr>`).join('') || '<tr><td colspan="4">no data</td></tr>';
+    $('sysup').textContent = fmtDur(s.system_uptime_s);
+  } catch (e) { $('state').textContent = 'offline'; $('state').className = 'pill bad'; }
+}
+function poolRow(p, i) {
+  return `<h2>Pool ${i + 1}${i === 0 ? ' (primary)' : ''}</h2><div class="row">
+    <div><label class="f">URL (host:port)</label><input id="pu${i}" value="${p.url || ''}" placeholder="stratum+tcp://pool:3333"></div>
+    <div><label class="f">User / wallet.worker</label><input id="pn${i}" value="${p.user || ''}"></div>
+    <div><label class="f">Password</label><input id="pp${i}" value="${p.password || 'x'}"></div></div>`;
+}
+async function loadConfig() {
+  cfg = await j('/api/v1/x19/config');
+  presets = await j('/api/v1/x19/presets');
+  const pools = cfg.pools.slice(); while (pools.length < 3) pools.push({});
+  $('poolrows').innerHTML = pools.map(poolRow).join('');
+  $('freq').value = cfg.freq_mhz; $('volt').value = cfg.voltage;
+  $('fanmode').value = cfg.fan.mode; $('fantarget').value = cfg.fan.target_temp; $('fanmin').value = cfg.fan.min_percent; $('fanmanual').value = cfg.fan.manual_percent; $('maxtemp').value = cfg.max_pcb_temp;
+  renderPresets();
+}
+function renderPresets() {
+  $('presets').innerHTML = presets.map(p => `<div class="card preset ${+$('freq').value === p.freq_mhz && +$('volt').value === p.voltage ? 'sel' : ''}" onclick="pick('${p.name}')"><b>${p.name}</b><div class="note">${p.freq_mhz} MHz · ${p.voltage} V · ~${p.est_power_w} W</div><div class="note">${p.note}</div></div>`).join('');
+}
+function pick(n) { const p = presets.find(x => x.name === n); $('freq').value = p.freq_mhz; $('volt').value = p.voltage; renderPresets(); }
+['freq', 'volt'].forEach(id => $(id).oninput = renderPresets);
+async function saveConfig() {
+  const pools = [0, 1, 2].map(i => ({ url: $('pu' + i).value.trim(), user: $('pn' + i).value.trim(), password: $('pp' + i).value || 'x' })).filter(p => p.url);
+  const c = { pools, freq_mhz: +$('freq').value, voltage: +$('volt').value, max_pcb_temp: +$('maxtemp').value,
+    fan: { mode: $('fanmode').value, target_temp: +$('fantarget').value, min_percent: +$('fanmin').value, manual_percent: +$('fanmanual').value } };
+  const tab = document.querySelector('section.on').id, m = $({ pools: 'poolmsg', perf: 'perfmsg', cool: 'coolmsg' }[tab] || 'poolmsg');
+  m.className = 'msg'; m.textContent = 'Saving…';
+  try { await j('/api/v1/x19/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(c) }); m.className = 'msg ok'; m.textContent = 'Saved. Mining restarts (about a minute).'; cfg = c; }
+  catch (e) { m.className = 'msg bad'; m.textContent = e.message; }
+}
+async function changePw() {
+  const a = $('pw1').value, b = $('pw2').value, m = $('pwmsg');
+  if (a !== b) { m.className = 'msg bad'; m.textContent = 'Passwords do not match.'; return; }
+  await post('/api/v1/x19/password', { password: a }, 'pwmsg', 'Password changed.');
+  $('pw1').value = $('pw2').value = '';
+}
+async function loadSys() {
+  try { const p = await j('/api/v1/x19/password'); $('pwnote').textContent = p.custom ? 'A custom password is set.' : 'Still the image default password — change it now.'; $('pwnote').style.color = p.custom ? '' : 'var(--warn)'; } catch {}
+  try { const f = await j('/api/v1/system/firmware'); $('fw').textContent = `${f.name} ${f.version} (${f.source_commit || ''})`; } catch {}
+  try { const b = await j('/api/v1/x19/boot'); $('bootinfo').textContent = `slot ${b.slot}${b.trial ? ' — trial: next reboot returns to Braiins OS' : ' — permanent'}`; $('slot').textContent = b.trial ? 'trial boot' : 'slot ' + b.slot; $('keepbtn').style.display = b.trial ? '' : 'none'; } catch (e) { $('bootinfo').textContent = e.message; }
+  try { $('log').textContent = await j('/api/v1/x19/log'); } catch {}
+}
+refresh(); loadConfig(); loadSys();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

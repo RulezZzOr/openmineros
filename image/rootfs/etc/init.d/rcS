@@ -1,0 +1,35 @@
+#!/bin/sh
+# OpenMinerOS early boot. Runs once, before the control plane starts.
+#
+# This build does not drive hashboards, fans or the PSU. It deliberately
+# leaves every GPIO and the FPGA untouched so the power stage stays in the
+# state the boot loader left it in.
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+
+# Kernels built without devtmpfs (the Braiins 4.4 kernel, for one) leave
+# /dev with only the nodes packed into the ramdisk. mdev fills it in, and
+# as the hotplug helper it also adds the SD card when it shows up later.
+if ! grep -q '^devtmpfs /dev ' /proc/mounts; then
+	echo /sbin/mdev > /proc/sys/kernel/hotplug
+	mdev -s
+fi
+
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+
+hostname -F /etc/hostname
+
+ip link set lo up
+if [ -e /sys/class/net/eth0 ]; then
+	ip link set eth0 up
+	udhcpc -i eth0 -b -t 10 -s /usr/share/udhcpc/default.script \
+		-x "hostname:$(hostname)"
+else
+	echo "rcS: eth0 not found, network is down"
+fi
+
+/usr/sbin/omo-sdlog </dev/null &

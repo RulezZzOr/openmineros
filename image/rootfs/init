@@ -1,0 +1,5 @@
+#!/bin/sh
+# The kernel does not mount devtmpfs for an initramfs root. Without
+# devtmpfs support this fails and rcS populates /dev with mdev instead.
+/bin/mount -t devtmpfs devtmpfs /dev 2>/dev/null
+exec /sbin/init "$@" </dev/console >/dev/console 2>&1

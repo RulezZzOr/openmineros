@@ -1,0 +1,40 @@
+[package]
+name = "openmineros-board-xil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+openmineros-common = { path = "../common" }
+openmineros-miner-core = { path = "../miner-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[[bin]]
+name = "omo-fpga-probe"
+path = "src/bin/omo-fpga-probe.rs"
+
+
+[[bin]]
+name = "omo-chain-probe"
+path = "src/bin/omo-chain-probe.rs"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "omo-i2c-trace"
+path = "src/bin/omo-i2c-trace.rs"
+
+[[bin]]
+name = "omo-minerd"
+path = "src/bin/omo-minerd.rs"
+
+[[bin]]
+name = "omo-bootenv"
+path = "src/bin/omo-bootenv.rs"
