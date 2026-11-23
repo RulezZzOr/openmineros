@@ -135,7 +135,7 @@ fn random_salt() -> Result<[u8; 16], String> {
     Ok(salt)
 }
 
-fn hash_web_password(pw: &str) -> Result<String, String> {
+pub fn hash_web_password(pw: &str) -> Result<String, String> {
     let salt = random_salt()?;
     let key = pbkdf2_sha256(pw.as_bytes(), &salt, PBKDF2_ITERATIONS);
     Ok(format!(

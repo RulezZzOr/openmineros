@@ -51,11 +51,9 @@ echo omo-s19 > "$r/etc/hostname"
 ln -sf /tmp/resolv.conf "$r/etc/resolv.conf"
 ln -sf /tmp "$r/var/log"
 
-# Salted PBKDF2-SHA256, the format omo-control-plane writes (x19_api.rs).
-webhash=$(OMO_PW="$rootpw" python3 -I -c 'import hashlib, os
-salt = os.urandom(16)
-key = hashlib.pbkdf2_hmac("sha256", os.environ["OMO_PW"].encode(), salt, 20000)
-print("pbkdf2-sha256$20000$" + salt.hex() + "$" + key.hex())')
+# Salted PBKDF2-SHA256, computed by the control plane itself (x19_api.rs).
+webhash="$(printf '%s\n' "$rootpw" | qemu-arm-static "$bin/openmineros-control-plane" --hash-password)"
+case "$webhash" in 'pbkdf2-sha256$'*) ;; *) echo "web password hashing failed" >&2; exit 1 ;; esac
 printf 'root:%s\n' "$webhash" > "$r/etc/openmineros/web-auth"
 chmod 0600 "$r/etc/openmineros/web-auth"
 if [ "$pool" = - ] || [ "$user" = - ]; then pools='[]'; else pools="[ { \"url\": \"$pool\", \"user\": \"$user\", \"password\": \"x\" } ]"; fi

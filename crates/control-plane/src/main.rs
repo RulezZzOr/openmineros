@@ -25,6 +25,10 @@ struct Cli {
     /// Firmware identity written by the image build. Overrides --board.
     #[arg(long)]
     fw_info: Option<PathBuf>,
+    /// Read a password from stdin, print its web-auth hash and exit (used by
+    /// the image build to write /etc/openmineros/web-auth).
+    #[arg(long)]
+    hash_password: bool,
 }
 
 #[tokio::main]
@@ -37,6 +41,16 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if cli.hash_password {
+        let mut pw = String::new();
+        std::io::stdin().read_line(&mut pw)?;
+        let pw = pw.trim_end_matches(['\r', '\n']);
+        println!(
+            "{}",
+            x19_api::hash_web_password(pw).map_err(anyhow::Error::msg)?
+        );
+        return Ok(());
+    }
     let model: Model = cli.model.parse().context("invalid model")?;
     let firmware = match &cli.fw_info {
         Some(path) => FirmwareInfo::load(path)
