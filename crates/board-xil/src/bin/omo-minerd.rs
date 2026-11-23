@@ -284,6 +284,7 @@ mod imp {
                     password: p.password.clone(),
                     seconds,
                     frame_interval: Duration::from_micros(frame_us),
+                    header_reuse: !std::env::args().any(|a| a == "--no-header-reuse"),
                     pic_heartbeat: pic_addrs.clone(),
                     max_pcb_temp: cfg.max_pcb_temp,
                     fan: fan.clone(),

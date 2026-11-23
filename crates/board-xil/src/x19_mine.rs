@@ -107,6 +107,8 @@ mod imp {
         /// 0 = until stopped.
         pub seconds: u64,
         pub frame_interval: Duration,
+        /// Frames share one merkle root and differ in version (see `run`).
+        pub header_reuse: bool,
         /// PIC I2C addresses, index-aligned with the chains.
         pub pic_heartbeat: Vec<u8>,
         pub max_pcb_temp: f64,
@@ -607,7 +609,7 @@ mod imp {
                         if st.chain.work_tx_empty() {
                             r.fifo_empty += 1;
                         }
-                        if vgroup >= version_groups(mask) {
+                        if !opt.header_reuse || vgroup >= version_groups(mask) {
                             cur = None;
                         }
                         if cur.is_none() {
