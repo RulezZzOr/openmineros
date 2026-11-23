@@ -109,6 +109,18 @@ mod imp {
     pub fn run() -> Result<(), String> {
         let path = arg("--config").unwrap_or_else(|| CONFIG_PATH.to_owned());
         let seconds: u64 = arg("--seconds").and_then(|s| s.parse().ok()).unwrap_or(0);
+        // Tuning knobs for experiments; the defaults are the shipped values.
+        let frame_us: u64 = arg("--frame-us")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        for (flag, knob) in [
+            ("--work-time-permille", &board::WORK_TIME_PERMILLE),
+            ("--hash-counting-permille", &board::HASH_COUNTING_PERMILLE),
+        ] {
+            if let Some(v) = arg(flag).and_then(|s| s.parse::<u32>().ok()) {
+                knob.store(v.clamp(100, 10_000), Ordering::Relaxed);
+            }
+        }
         let cfg = match MinerConfig::load(&path) {
             Ok(c) => c,
             Err(e) => {
@@ -271,7 +283,7 @@ mod imp {
                     user: p.user.clone(),
                     password: p.password.clone(),
                     seconds,
-                    frame_interval: Duration::from_micros(1500),
+                    frame_interval: Duration::from_micros(frame_us),
                     pic_heartbeat: pic_addrs.clone(),
                     max_pcb_temp: cfg.max_pcb_temp,
                     fan: fan.clone(),

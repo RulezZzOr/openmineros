@@ -324,6 +324,14 @@ mod hw {
             }
             out
         }
+        /// Room for one more frame (same test as [`Self::push_work`]).
+        pub fn work_tx_has_room(&self) -> bool {
+            let stat = self.work_tx.read(fifo::STAT);
+            stat & fifo::STAT_TX_FULL == 0 && stat & fifo::STAT_BELOW_THRESHOLD != 0
+        }
+        pub fn work_tx_empty(&self) -> bool {
+            self.work_tx.read(fifo::STAT) & fifo::STAT_TX_EMPTY != 0
+        }
         pub fn work_tx_full(&self) -> bool {
             self.work_tx.read(fifo::STAT) & fifo::STAT_TX_FULL != 0
         }

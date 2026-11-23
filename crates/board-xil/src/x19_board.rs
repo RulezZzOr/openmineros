@@ -32,15 +32,27 @@ pub fn misc_control(addr: u8) -> u32 {
     }
 }
 
+/// Tuning multipliers (per mille, 1000 = the measured bosminer curve) for
+/// [`hash_counting`] and [`work_time`], so the miner can be tuned without a
+/// rebuild. Set once before chains are initialised.
+pub static HASH_COUNTING_PERMILLE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1000);
+pub static WORK_TIME_PERMILLE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1000);
+
+fn scaled(v: f64, permille: &std::sync::atomic::AtomicU32) -> u32 {
+    (v * f64::from(permille.load(std::sync::atomic::Ordering::Relaxed)) / 1000.0).round() as u32
+}
+
 /// Hash-counting register 0x10 scales with 1/frequency (bosminer: 0xEEC0 at
 /// ~72 MHz, 0x9EF0 at 109 MHz).
 pub fn hash_counting(freq_mhz: f64) -> u32 {
-    (4_435_000.0 / freq_mhz).round() as u32
+    scaled(4_435_000.0 / freq_mhz, &HASH_COUNTING_PERMILLE)
 }
 
 /// FPGA WORK_TIME (bosminer: 0x3FAA8 at 109 MHz, 0x5F805 at 80 MHz).
 pub fn work_time(freq_mhz: f64) -> u32 {
-    (28_400_000.0 / freq_mhz).round() as u32
+    scaled(28_400_000.0 / freq_mhz, &WORK_TIME_PERMILLE)
 }
 
 /// Finds the PLL0 value closest to `mhz` (VCO 2000–3200 MHz from the 25 MHz

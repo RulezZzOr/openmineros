@@ -128,6 +128,8 @@ mod imp {
         pub valid_diff1: u64,
         pub invalid: u64,
         pub duplicates: u64,
+        /// Times the work-tx FIFO was found empty when work was due.
+        pub fifo_empty: u64,
         pub stale_unknown_id: u64,
         pub shares_submitted: u64,
         pub shares_accepted: u64,
@@ -338,6 +340,16 @@ mod imp {
         }
     }
 
+    /// Frames that can share one header: distinct groups of SLOTS versions in
+    /// the contiguous low part of the pool's version mask (1 without rolling).
+    fn version_groups(mask: u32) -> u32 {
+        if mask == 0 {
+            return 1;
+        }
+        let bits = (mask >> mask.trailing_zeros()).trailing_ones().min(24);
+        ((1u32 << bits) / SLOTS as u32).max(1)
+    }
+
     fn load_best(path: &str) -> f64 {
         std::fs::read_to_string(path)
             .ok()
@@ -410,7 +422,9 @@ mod imp {
             "best_share_all_time": r.best_share_all_time,
             "network_difficulty": r.network_difficulty,
             "blocks_found": r.blocks_found,
-            "nonces": { "valid": r.valid_diff1, "invalid": r.invalid, "duplicates": r.duplicates },
+            "nonces": { "valid": r.valid_diff1, "invalid": r.invalid, "duplicates": r.duplicates, "stale_id": r.stale_unknown_id },
+            "frames": r.frames,
+            "fifo_empty": r.fifo_empty,
             "temps_pcb": [f(&board.temps[0]), f(&board.temps[1]), f(&board.temps[2])],
             "fan_percent": board.fan_percent.load(Relaxed),
             "heartbeats": { "ok": board.hb_ok.load(Relaxed), "failed": board.hb_err.load(Relaxed) },
@@ -456,6 +470,12 @@ mod imp {
         let mut target = target_from_pool_difficulty(1.0).unwrap();
         let diff1 = target_from_pool_difficulty(1.0).unwrap();
         let mut en2: u64 = 0;
+        // Header shared by many frames: one merkle root (extranonce2), each
+        // frame takes the next group of SLOTS versions from the pool's mask.
+        // Building the merkle root dominates the CPU cost of a frame, so
+        // this keeps the FIFOs full at high clocks on the single A9 core.
+        let mut cur: Option<(BlockHeader, Vec<u8>)> = None;
+        let mut vgroup: u32 = 0;
         let mut submits: HashSet<u64> = HashSet::new();
         let mut states: Vec<ChainState> = chains
             .iter()
@@ -523,6 +543,7 @@ mod imp {
                             }
                         }
                         job = Some(n);
+                        cur = None;
                         last_notify = Instant::now();
                     }
                     Some("mining.set_difficulty") => {
@@ -581,20 +602,37 @@ mod imp {
 
             for st in &mut states {
                 if let (Some(s), Some(n)) = (&sub, &job) {
-                    if st.last_frame.elapsed() >= opt.frame_interval {
-                        let mut e2 = en2.to_be_bytes().to_vec();
-                        e2 = e2[e2.len().saturating_sub(s.extranonce2_size)..].to_vec();
-                        while e2.len() < s.extranonce2_size {
-                            e2.insert(0, 0);
+                    if st.last_frame.elapsed() >= opt.frame_interval && st.chain.work_tx_has_room()
+                    {
+                        if st.chain.work_tx_empty() {
+                            r.fifo_empty += 1;
                         }
-                        let base = n.header(&s.extranonce1, &e2).map_err(|e| e.to_string())?;
+                        if vgroup >= version_groups(mask) {
+                            cur = None;
+                        }
+                        if cur.is_none() {
+                            let mut e2 = en2.to_be_bytes().to_vec();
+                            e2 = e2[e2.len().saturating_sub(s.extranonce2_size)..].to_vec();
+                            while e2.len() < s.extranonce2_size {
+                                e2.insert(0, 0);
+                            }
+                            let base = n.header(&s.extranonce1, &e2).map_err(|e| e.to_string())?;
+                            cur = Some((base, e2));
+                            en2 = en2.wrapping_add(1);
+                            vgroup = 0;
+                        }
+                        let (base, e2) = cur.clone().expect("set above");
                         let mut versions = [0u32; SLOTS];
                         let mut headers = [[0u8; 80]; SLOTS];
                         for (i, v) in versions.iter_mut().enumerate() {
                             *v = if mask == 0 {
                                 base.version
                             } else {
-                                work::rolled_version(base.version, mask, i as u32)
+                                work::rolled_version(
+                                    base.version,
+                                    mask,
+                                    vgroup * SLOTS as u32 + i as u32,
+                                )
                             };
                             let mut h = base;
                             h.version = *v;
@@ -623,7 +661,7 @@ mod imp {
                                 }
                             }
                             st.next_ext = st.next_ext.wrapping_add(1);
-                            en2 = en2.wrapping_add(1);
+                            vgroup += 1;
                             r.frames += 1;
                             st.last_frame = Instant::now();
                         }
