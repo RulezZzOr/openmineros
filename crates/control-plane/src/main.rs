@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(x19_api::routes())
         .layer(axum::middleware::from_fn(x19_api::guard));
 
+    x19_api::spawn_sampler();
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     info!(
         "OpenMinerOS control plane listening on http://{}",

@@ -50,6 +50,12 @@
   .note { color: var(--muted); font-size: 13px; margin-top: 6px; }
   a.donate { color: var(--accent); border-color: var(--accent); text-decoration: none; }
   a.donate:hover { background: var(--accent); color: #111; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+  .chart svg { width: 100%; height: auto; display: block; margin-top: 8px; }
+  .chart .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .chart .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  svg text { fill: var(--muted); font-size: 11px; font-family: inherit; }
+  svg .grid { stroke: var(--line); stroke-width: 1; }
 </style>
 </head>
 <body>
@@ -80,6 +86,15 @@
       <div class="card"><div class="label">Power (estimate)</div><div class="big" id="pw">–</div><div class="note" id="eff"></div></div>
       <div class="card"><div class="label">Mining for</div><div class="big" id="up">–</div></div>
     </div>
+    <h2>Last 24 hours</h2>
+    <div class="charts">
+      <div class="card chart"><div class="label">Hashrate (TH/s)</div><div id="ch-hr"></div></div>
+      <div class="card chart"><div class="label">Hashboard PCB temperature (°C)</div><div id="ch-temp"></div></div>
+      <div class="card chart"><div class="label">Fan speed (%)</div><div id="ch-fan"></div></div>
+      <div class="card chart"><div class="label">Power (W, estimate)</div><div id="ch-pw"></div></div>
+    </div>
+    <h2>Best share per day</h2>
+    <div class="card chart"><div class="note">Highest share difficulty found each day (log scale). Days are dated by the pool's block time.</div><div id="ch-best"></div></div>
     <h2>Pool</h2>
     <div class="card"><div id="pool">–</div><div class="note" id="statemsg"></div></div>
     <h2>Hashboards</h2>
@@ -175,6 +190,7 @@ async function refresh() {
     const sh = s.shares || {}; $('sh').textContent = (sh.accepted ?? 0) + ' / ' + (sh.rejected ?? 0);
     $('best').textContent = fmtDiff(s.best_share);
     $('bestall').textContent = fmtDiff(s.best_share_all_time);
+    netDiff = s.network_difficulty || netDiff;
     const nd = s.network_difficulty || 0, pct = nd ? 100 * (s.best_share_all_time || 0) / nd : 0;
     $('bestnote').textContent = nd ? pct.toPrecision(3) + ' % of a block (network ' + fmtDiff(nd) + ')' : '';
     $('bestbar').style.width = Math.min(100, Math.max(pct > 0 ? 1 : 0, Math.log10(1 + pct) * 50)) + '%';
@@ -190,6 +206,58 @@ async function refresh() {
     $('chains').innerHTML = (s.chains || []).map(c => `<tr><td>#${c.chain}</td><td>${c.hashrate_ths.toFixed(2)} TH/s</td><td>${c.pcb_temp ? c.pcb_temp.toFixed(1) + ' °C' : '–'}</td><td>${c.valid}</td></tr>`).join('') || '<tr><td colspan="4">no data</td></tr>';
     $('sysup').textContent = fmtDur(s.system_uptime_s);
   } catch (e) { $('state').textContent = 'offline'; $('state').className = 'pill bad'; }
+}
+const SERIES = ['#f7931a', '#4ea1ff', '#34c77b', '#c07bff'];
+const esc = (t) => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const hhmm = (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// Line chart: xs = timestamps (ms), series = [{ name, color, ys: [number|null] }].
+function lineChart(el, xs, series, unit, minY) {
+  const W = 560, H = 190, L = 40, R = 8, T = 8, B = 22;
+  const all = series.flatMap(s => s.ys).filter(v => v != null);
+  if (xs.length < 2 || !all.length) { el.innerHTML = '<div class="note">Collecting data — the first points appear after a few minutes.</div>'; return; }
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (minY != null) lo = Math.min(lo, minY);
+  if (hi - lo < 1e-9) { hi += 1; lo = Math.max(0, lo - 1); }
+  const pad = (hi - lo) * 0.08; hi += pad; lo = minY != null ? lo : lo - pad;
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const X = (x) => L + (x - x0) / Math.max(1, x1 - x0) * (W - L - R), Y = (y) => T + (hi - y) / (hi - lo) * (H - T - B);
+  let g = '';
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4, y = Y(v); g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 4}" y="${y + 4}" text-anchor="end">${v.toFixed(hi - lo < 10 ? 1 : 0)}</text>`; }
+  for (let i = 0; i <= 4; i++) { const x = x0 + (x1 - x0) * i / 4; g += `<text x="${X(x)}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : i === 4 ? 'end' : 'middle'}">${hhmm(x)}</text>`; }
+  const paths = series.map(s => { let d = '', pen = false; s.ys.forEach((v, i) => { if (v == null) { pen = false; return; } d += (pen ? 'L' : 'M') + X(xs[i]).toFixed(1) + ' ' + Y(v).toFixed(1); pen = true; }); return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>`; }).join('');
+  const last = series.map(s => { const v = [...s.ys].reverse().find(v => v != null); return `<span><i style="background:${s.color}"></i>${esc(s.name)}${v != null ? ' ' + v.toFixed(1) + ' ' + unit : ''}</span>`; }).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">${g}${paths}</svg><div class="legend">${last}</div>`;
+}
+// Bars on a log scale: days = [[unixDay, difficulty], ...].
+function bestChart(el, days, netDiff) {
+  if (!days.length) { el.innerHTML = '<div class="note">No shares recorded yet.</div>'; return; }
+  const W = 560, H = 200, L = 44, R = 8, T = 10, B = 22;
+  const vals = days.map(d => d[1]);
+  let lo = Math.floor(Math.log10(Math.min(...vals))), hi = Math.ceil(Math.log10(Math.max(...vals)));
+  if (hi === lo) hi++;
+  const Y = (v) => T + (hi - Math.log10(v)) / (hi - lo) * (H - T - B);
+  const bw = (W - L - R) / days.length;
+  let g = '';
+  for (let e = lo; e <= hi; e++) { const y = Y(10 ** e); g += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/><text x="${L - 4}" y="${y + 4}" text-anchor="end">${fmtDiff(10 ** e).replace('.00 ', '')}</text>`; }
+  const best = Math.max(...vals);
+  const bars = days.map(([day, v], i) => { const w = Math.max(1, Math.min(bw * 0.7, 28)), x = L + i * bw + (bw - w) / 2, y = Y(v), date = new Date(day * 86400000).toLocaleDateString(); return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${(H - B - y).toFixed(1)}" rx="2" fill="${v === best ? 'var(--accent)' : '#4ea1ff'}"><title>${date}: ${fmtDiff(v)}</title></rect>`; }).join('');
+  const step = Math.max(1, Math.ceil(days.length / 6));
+  const labels = days.map(([day], i) => i % step ? '' : `<text x="${(L + i * bw + bw / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle">${new Date(day * 86400000).toLocaleDateString([], { day: 'numeric', month: 'numeric' })}</text>`).join('');
+  const pct = netDiff ? ` · ${(100 * best / netDiff).toPrecision(3)} % of a block` : '';
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img">${g}${bars}${labels}</svg><div class="legend"><span><i style="background:var(--accent)"></i>record ${fmtDiff(best)}${pct}</span><span>${days.length} day(s)</span></div>`;
+}
+let netDiff = 0;
+async function loadCharts() {
+  try {
+    const h = await j('/api/v1/x19/history'), now = Date.now(), ss = h.samples || [];
+    const xs = ss.map(p => now - p.age_s * 1000);
+    lineChart($('ch-hr'), xs, [{ name: 'hashrate', color: SERIES[0], ys: ss.map(p => p.ths) }], 'TH/s', 0);
+    const boards = Math.max(0, ...ss.map(p => (p.temps || []).length));
+    lineChart($('ch-temp'), xs, [...Array(boards).keys()].map(b => ({ name: 'board ' + (b + 1), color: SERIES[b % SERIES.length], ys: ss.map(p => (p.temps || [])[b] ?? null) })), '°C');
+    lineChart($('ch-fan'), xs, [{ name: 'fans', color: SERIES[1], ys: ss.map(p => p.fan ?? null) }], '%', 0);
+    lineChart($('ch-pw'), xs, [{ name: 'power', color: SERIES[2], ys: ss.map(p => p.w) }], 'W', 0);
+  } catch {}
+  try { const b = await j('/api/v1/x19/best-history'); bestChart($('ch-best'), b.days || [], netDiff); } catch {}
 }
 function poolRow(p, i) {
   return `<h2>Pool ${i + 1}${i === 0 ? ' (primary)' : ''}</h2><div class="row">
@@ -232,8 +300,9 @@ async function loadSys() {
   try { const b = await j('/api/v1/x19/boot'); $('bootinfo').textContent = `slot ${b.slot}${b.trial ? ' — trial: next reboot returns to Braiins OS' : ' — permanent'}`; $('slot').textContent = b.trial ? 'trial boot' : 'slot ' + b.slot; $('keepbtn').style.display = b.trial ? '' : 'none'; } catch (e) { $('bootinfo').textContent = e.message; }
   try { $('log').textContent = await j('/api/v1/x19/log'); } catch {}
 }
-refresh(); loadConfig(); loadSys();
+refresh().then(loadCharts); loadConfig(); loadSys();
 setInterval(refresh, 5000);
+setInterval(loadCharts, 60000);
 </script>
 </body>
 </html>

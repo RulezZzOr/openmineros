@@ -38,6 +38,8 @@ pub fn routes() -> Router {
         .route("/api/v1/x19/config", get(get_config).put(put_config))
         .route("/api/v1/x19/presets", get(get_presets))
         .route("/api/v1/x19/log", get(log))
+        .route("/api/v1/x19/history", get(history))
+        .route("/api/v1/x19/best-history", get(best_history))
         .route("/api/v1/x19/restart", post(restart))
         .route("/api/v1/x19/reboot", post(reboot))
         .route("/api/v1/x19/boot", get(boot_state).post(boot))
@@ -308,6 +310,116 @@ async fn status() -> Json<Value> {
     Json(v)
 }
 
+/// Seconds between history samples, and how many are kept (24 h).
+const SAMPLE_EVERY: Duration = Duration::from_secs(60);
+const SAMPLES_KEPT: usize = 24 * 60;
+const BEST_HISTORY_PATH: &str = "/data/omo/best-history.json";
+
+struct Sample {
+    at: std::time::Instant,
+    ths: f64,
+    temps: Vec<Option<f64>>,
+    fan: Option<f64>,
+    watts: f64,
+}
+
+static SAMPLES: Mutex<std::collections::VecDeque<Sample>> =
+    Mutex::new(std::collections::VecDeque::new());
+
+/// One history point from the miner's status file. A status older than two
+/// minutes means the miner is not running: zero hashrate, idle power.
+fn sample_from_status(v: &Value, now: u64) -> (f64, Vec<Option<f64>>, Option<f64>, f64) {
+    let fresh = v["updated"]
+        .as_u64()
+        .is_some_and(|u| now.saturating_sub(u) <= 120);
+    let mining = fresh && v["state"].as_str() == Some("mining");
+    if !fresh {
+        return (0.0, vec![], None, 60.0);
+    }
+    let temps = v["temps_pcb"]
+        .as_array()
+        .map(|a| a.iter().map(|t| t.as_f64().filter(|t| *t > 0.0)).collect())
+        .unwrap_or_default();
+    let watts = match (v["freq_mhz"].as_f64(), v["voltage"].as_f64()) {
+        (Some(f), Some(u)) if mining => estimated_power(f, u).round(),
+        _ => 60.0,
+    };
+    (
+        if mining {
+            v["hashrate_ths"].as_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        },
+        temps,
+        v["fan_percent"].as_f64(),
+        watts,
+    )
+}
+
+/// Samples the miner status once a minute into an in-memory 24 h ring. It is
+/// kept in RAM on purpose: a write per minute would wear the NAND.
+pub fn spawn_sampler() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(SAMPLE_EVERY);
+        loop {
+            tick.tick().await;
+            let v: Value = std::fs::read_to_string(STATUS_PATH)
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(Value::Null);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let (ths, temps, fan, watts) = sample_from_status(&v, now);
+            if let Ok(mut q) = SAMPLES.lock() {
+                if q.len() >= SAMPLES_KEPT {
+                    q.pop_front();
+                }
+                q.push_back(Sample {
+                    at: std::time::Instant::now(),
+                    ths,
+                    temps,
+                    fan,
+                    watts,
+                });
+            }
+        }
+    });
+}
+
+/// Last 24 h, oldest first. Points carry their age in seconds because the
+/// board clock is not set; the browser turns ages into local times.
+async fn history() -> Json<Value> {
+    let samples = SAMPLES.lock().map(|q| {
+        q.iter()
+            .map(|s| {
+                json!({
+                    "age_s": s.at.elapsed().as_secs(),
+                    "ths": (s.ths * 100.0).round() / 100.0,
+                    "temps": s.temps,
+                    "fan": s.fan,
+                    "w": s.watts,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    Json(json!({
+        "interval_s": SAMPLE_EVERY.as_secs(),
+        "samples": samples.unwrap_or_default(),
+    }))
+}
+
+/// Best share per day (`[[unix_day, difficulty], ...]`), dated by the pool.
+async fn best_history() -> Json<Value> {
+    Json(
+        std::fs::read_to_string(BEST_HISTORY_PATH)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| json!({ "days": [] })),
+    )
+}
+
 async fn get_config() -> Response {
     match std::fs::read_to_string(CONFIG_PATH)
         .ok()
@@ -506,6 +618,22 @@ mod tests {
     fn base64_decodes_basic_credentials() {
         assert_eq!(b64decode("cm9vdDpzZWNyZXQ=").unwrap(), b"root:secret");
         assert!(b64decode("@@").is_none());
+    }
+
+    #[test]
+    fn history_sample_reads_status() {
+        let v = json!({
+            "state": "mining", "updated": 1000, "hashrate_ths": 14.6,
+            "temps_pcb": [41.5, 0.0, 43.0], "fan_percent": 35,
+            "freq_mhz": 109.0, "voltage": 11.96,
+        });
+        let (ths, temps, fan, w) = sample_from_status(&v, 1030);
+        assert_eq!(ths, 14.6);
+        assert_eq!(temps, vec![Some(41.5), None, Some(43.0)]);
+        assert_eq!(fan, Some(35.0));
+        assert_eq!(w, estimated_power(109.0, 11.96).round());
+        let (ths, temps, _, w) = sample_from_status(&v, 2000);
+        assert_eq!((ths, temps.len(), w), (0.0, 0, 60.0));
     }
 
     #[test]

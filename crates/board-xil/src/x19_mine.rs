@@ -10,6 +10,33 @@
 #[cfg(unix)]
 pub use imp::{FanControl, MineOptions, MineReport, mine};
 
+/// How many days of best-share history are kept.
+pub const HISTORY_DAYS: usize = 730;
+
+/// Folds a share into the per-day best-share history (`(unix day, best)`,
+/// oldest first). Returns true when the history changed and must be saved.
+/// A day older than the newest entry is ignored (pool clock went backwards).
+pub fn update_daily_best(days: &mut Vec<(u64, f64)>, day: u64, d: f64) -> bool {
+    match days.last_mut() {
+        Some((last, best)) if *last == day => {
+            if d > *best {
+                *best = d;
+                true
+            } else {
+                false
+            }
+        }
+        Some((last, _)) if *last > day => false,
+        _ => {
+            days.push((day, d));
+            if days.len() > HISTORY_DAYS {
+                days.remove(0);
+            }
+            true
+        }
+    }
+}
+
 /// Difficulty of a hash (internal byte order digest), relative to diff 1.
 pub fn share_difficulty(digest: &[u8; 32]) -> f64 {
     // Value of the hash as a number (digest is little-endian).
@@ -37,7 +64,7 @@ pub fn network_difficulty(nbits: u32) -> f64 {
 
 #[cfg(unix)]
 mod imp {
-    use super::{network_difficulty, share_difficulty};
+    use super::{network_difficulty, share_difficulty, update_daily_best};
     use crate::x19::Chain;
     use crate::x19_board::{Fans, Pics};
     use crate::x19_work::{self as work, MidstateOrder};
@@ -331,6 +358,26 @@ mod imp {
         }
     }
 
+    /// `best-history.json` next to `best.json`: `{"days": [[unix_day, best], ...]}`.
+    fn history_path(best_path: &str) -> std::path::PathBuf {
+        std::path::Path::new(best_path).with_file_name("best-history.json")
+    }
+
+    fn load_history(path: &std::path::Path) -> Vec<(u64, f64)> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| serde_json::from_value(v["days"].clone()).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_history(path: &std::path::Path, days: &[(u64, f64)]) {
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, json!({ "days": days }).to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+
     fn now_s() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -430,6 +477,8 @@ mod imp {
         if let Some(p) = &opt.best_path {
             r.best_share_all_time = r.best_share_all_time.max(load_best(p));
         }
+        let hist_path = opt.best_path.as_deref().map(history_path);
+        let mut daily = hist_path.as_deref().map(load_history).unwrap_or_default();
         let start = Instant::now();
         let mut last_status = Instant::now() - Duration::from_secs(10);
         let mut last_notify = Instant::now();
@@ -608,6 +657,12 @@ mod imp {
                     if d > r.best_share {
                         r.best_share = d;
                     }
+                    // The board has no RTC or NTP: the pool's ntime is the clock.
+                    if let Some(hp) = &hist_path {
+                        if update_daily_best(&mut daily, u64::from(h.time) / 86_400, d) {
+                            save_history(hp, &daily);
+                        }
+                    }
                     if d > r.best_share_all_time {
                         r.best_share_all_time = d;
                         if let Some(p) = &opt.best_path {
@@ -687,6 +742,21 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::share_difficulty;
+
+    #[test]
+    fn daily_best_keeps_one_maximum_per_day() {
+        let mut days = Vec::new();
+        assert!(super::update_daily_best(&mut days, 100, 5.0));
+        assert!(!super::update_daily_best(&mut days, 100, 3.0));
+        assert!(super::update_daily_best(&mut days, 100, 9.0));
+        assert!(super::update_daily_best(&mut days, 101, 1.0));
+        assert!(!super::update_daily_best(&mut days, 99, 50.0));
+        assert_eq!(days, vec![(100, 9.0), (101, 1.0)]);
+        for day in 0..(super::HISTORY_DAYS as u64 + 5) {
+            super::update_daily_best(&mut days, 200 + day, 1.0);
+        }
+        assert_eq!(days.len(), super::HISTORY_DAYS);
+    }
 
     #[test]
     fn network_difficulty_from_bits() {
