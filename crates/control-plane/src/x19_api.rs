@@ -4,8 +4,8 @@
 use axum::{
     Json, Router,
     body::Body,
-    http::{Request, StatusCode, header},
-    middleware::{self, Next},
+    http::{HeaderMap, Method, Request, StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,14 +16,20 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::process::Command;
+use std::sync::Mutex;
+use std::time::Duration;
 
-/// `user:sha256hex(password)`, written by the image build (default) and
-/// replaced by the user from the web UI (stored on /data, so it survives
-/// reboots and firmware updates).
+/// `user:<hash>`, written by the image build (default) and replaced by the
+/// user from the web UI (stored on /data, so it survives reboots and firmware
+/// updates). `<hash>` is `pbkdf2-sha256$<iterations>$<salt hex>$<key hex>`;
+/// a bare 64-digit SHA-256 hex digest is still accepted for older images.
 pub const WEB_AUTH_PATH: &str = "/etc/openmineros/web-auth";
 pub const USER_AUTH_PATH: &str = "/data/omo/web-auth";
 pub const USER_SHADOW_PATH: &str = "/data/omo/shadow";
 const LOG_PATH: &str = "/tmp/omo-minerd.log";
+const PBKDF2_ITERATIONS: u32 = 20_000;
+/// Delay before answering a failed login, to slow down password guessing.
+const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(1);
 
 pub fn routes() -> Router {
     Router::new()
@@ -39,7 +45,6 @@ pub fn routes() -> Router {
             "/api/v1/x19/password",
             get(password_state).post(set_password),
         )
-        .layer(middleware::from_fn(basic_auth))
 }
 
 async fn index() -> axum::response::Html<&'static str> {
@@ -74,22 +79,131 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Checks HTTP Basic credentials against WEB_AUTH_PATH. Without that file
-/// (development builds) the API is open.
-fn authorized(req: &Request<Body>) -> bool {
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Compares without an early exit, so timing does not reveal how many leading
+/// bytes matched.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn hmac_sha256(key: &[u8], msg: &[&[u8]]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(k.map(|b| b ^ 0x36));
+    for m in msg {
+        inner.update(m);
+    }
+    let mut outer = Sha256::new();
+    outer.update(k.map(|b| b ^ 0x5c));
+    outer.update(inner.finalize());
+    outer.finalize().into()
+}
+
+/// PBKDF2-HMAC-SHA256 with a single 32-byte output block (RFC 8018).
+fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut u = hmac_sha256(password, &[salt, &1u32.to_be_bytes()]);
+    let mut out = u;
+    for _ in 1..iterations {
+        u = hmac_sha256(password, &[&u]);
+        out.iter_mut().zip(u).for_each(|(o, x)| *o ^= x);
+    }
+    out
+}
+
+fn random_salt() -> Result<[u8; 16], String> {
+    use std::io::Read;
+    let mut salt = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut salt))
+        .map_err(|e| format!("random salt: {e}"))?;
+    Ok(salt)
+}
+
+fn hash_web_password(pw: &str) -> Result<String, String> {
+    let salt = random_salt()?;
+    let key = pbkdf2_sha256(pw.as_bytes(), &salt, PBKDF2_ITERATIONS);
+    Ok(format!(
+        "pbkdf2-sha256${PBKDF2_ITERATIONS}${}${}",
+        hex(&salt),
+        hex(&key)
+    ))
+}
+
+fn verify_web_password(pw: &str, stored: &str) -> bool {
+    let parts: Vec<&str> = stored.split('$').collect();
+    match parts.as_slice() {
+        ["pbkdf2-sha256", iters, salt, key] => {
+            let (Ok(iters), Some(salt), Some(key)) =
+                (iters.parse::<u32>(), unhex(salt), unhex(key))
+            else {
+                return false;
+            };
+            if !(1..=10_000_000).contains(&iters) {
+                return false;
+            }
+            ct_eq(&pbkdf2_sha256(pw.as_bytes(), &salt, iters), &key)
+        }
+        // Legacy image default: unsalted SHA-256.
+        [legacy] => unhex(legacy)
+            .is_some_and(|h| h.len() == 32 && ct_eq(&Sha256::digest(pw.as_bytes()), &h)),
+        _ => false,
+    }
+}
+
+/// Credentials that verified last time, keyed by a digest of the stored auth
+/// line and the Authorization header. PBKDF2 is slow on the Zynq on purpose,
+/// so the UI's status polling must not pay for it on every request.
+static VERIFIED: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+fn cache_key(stored: &str, header: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(stored.as_bytes());
+    h.update([0]);
+    h.update(header.as_bytes());
+    h.finalize().into()
+}
+
+/// Checks HTTP Basic credentials against USER_AUTH_PATH (falling back to the
+/// image default WEB_AUTH_PATH). Without either file (development builds)
+/// the API is open.
+fn authorized(headers: &HeaderMap) -> bool {
     let Ok(expected) =
         std::fs::read_to_string(USER_AUTH_PATH).or_else(|_| std::fs::read_to_string(WEB_AUTH_PATH))
     else {
         return true;
     };
-    let Some((user, hash)) = expected.trim().split_once(':') else {
+    let expected = expected.trim();
+    let Some((user, hash)) = expected.split_once(':') else {
         return false;
     };
-    let Some(given) = req
-        .headers()
+    let Some(raw) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Basic "))
+    else {
+        return false;
+    };
+    let key = cache_key(expected, raw);
+    if let Ok(cached) = VERIFIED.lock() {
+        if cached.is_some_and(|c| ct_eq(&c, &key)) {
+            return true;
+        }
+    }
+    let Some(given) = raw
+        .strip_prefix("Basic ")
         .and_then(b64decode)
         .and_then(|b| String::from_utf8(b).ok())
     else {
@@ -98,20 +212,62 @@ fn authorized(req: &Request<Body>) -> bool {
     let Some((u, p)) = given.split_once(':') else {
         return false;
     };
-    u == user && hex(&Sha256::digest(p.as_bytes())) == hash
+    let ok = ct_eq(u.as_bytes(), user.as_bytes()) && verify_web_password(p, hash);
+    if ok {
+        if let Ok(mut cached) = VERIFIED.lock() {
+            *cached = Some(key);
+        }
+    }
+    ok
 }
 
-async fn basic_auth(req: Request<Body>, next: Next) -> Response {
-    if authorized(&req) {
-        next.run(req).await
-    } else {
-        (
+/// Blocks cross-site request forgery: a state-changing request must be JSON
+/// (which a foreign page cannot send without a CORS preflight this server
+/// never grants) and, when the browser names its origin, come from this host.
+fn same_origin_write(req: &Request<Body>) -> bool {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return true;
+    }
+    let h = req.headers();
+    let json = h
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        });
+    let origin_ok = match h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(origin) => {
+            let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
+            let origin_host = origin.split_once("://").map(|(_, rest)| rest);
+            host.is_some() && origin_host == host
+        }
+    };
+    json && origin_ok
+}
+
+/// Authentication and CSRF guard for the whole HTTP API.
+pub async fn guard(req: Request<Body>, next: Next) -> Response {
+    // PBKDF2 takes a while on the Zynq: keep it off the async workers.
+    let headers = req.headers().clone();
+    let ok = tokio::task::spawn_blocking(move || authorized(&headers))
+        .await
+        .unwrap_or(false);
+    if !ok {
+        tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+        return (
             StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Basic realm=\"OpenMinerOS\"")],
             "login required",
         )
-            .into_response()
+            .into_response();
     }
+    if !same_origin_write(&req) {
+        return err(StatusCode::FORBIDDEN, "cross-site request refused");
+    }
+    next.run(req).await
 }
 
 fn err(code: StatusCode, msg: impl Into<String>) -> Response {
@@ -198,9 +354,17 @@ async fn restart() -> Json<Value> {
     Json(json!({ "restarting": true }))
 }
 
+/// Reboots after a delay, so the HTTP answer still reaches the browser.
+fn reboot_later() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(10));
+        let _ = Command::new("reboot").status();
+    });
+}
+
 async fn reboot() -> Json<Value> {
     restart_miner();
-    let _ = Command::new("sh").args(["-c", "sleep 10; reboot"]).spawn();
+    reboot_later();
     Json(json!({ "rebooting": true }))
 }
 
@@ -250,7 +414,7 @@ async fn boot(Json(r): Json<BootReq>) -> Response {
         "keep" => bootenv(&["keep-openmineros"]),
         "braiins" => bootenv(&["boot-braiins"]).inspect(|_| {
             restart_miner();
-            let _ = Command::new("sh").args(["-c", "sleep 10; reboot"]).spawn();
+            reboot_later();
         }),
         _ => return err(StatusCode::BAD_REQUEST, "target must be keep or braiins"),
     };
@@ -299,7 +463,10 @@ async fn set_password(Json(r): Json<PasswordReq>) -> Response {
             .args(["--bind", USER_SHADOW_PATH, "/etc/shadow"])
             .status();
     }
-    let auth = format!("root:{}\n", hex(&Sha256::digest(pw.as_bytes())));
+    let auth = match hash_web_password(&pw) {
+        Ok(h) => format!("root:{h}\n"),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
     let tmp = format!("{USER_AUTH_PATH}.tmp");
     if let Err(e) = std::fs::write(&tmp, auth).and_then(|_| std::fs::rename(&tmp, USER_AUTH_PATH)) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -339,5 +506,69 @@ mod tests {
     fn base64_decodes_basic_credentials() {
         assert_eq!(b64decode("cm9vdDpzZWNyZXQ=").unwrap(), b"root:secret");
         assert!(b64decode("@@").is_none());
+    }
+
+    #[test]
+    fn pbkdf2_matches_rfc7914_vector() {
+        // RFC 7914 section 11: PBKDF2-HMAC-SHA256("passwd", "salt", 1).
+        assert_eq!(
+            hex(&pbkdf2_sha256(b"passwd", b"salt", 1)),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+        );
+    }
+
+    #[test]
+    fn web_password_round_trips_and_accepts_legacy() {
+        let salt = [7u8; 16];
+        let stored = format!(
+            "pbkdf2-sha256$100${}${}",
+            hex(&salt),
+            hex(&pbkdf2_sha256(b"secret12", &salt, 100))
+        );
+        assert!(verify_web_password("secret12", &stored));
+        assert!(!verify_web_password("secret13", &stored));
+        let legacy = hex(&Sha256::digest(b"admin"));
+        assert!(verify_web_password("admin", &legacy));
+        assert!(!verify_web_password("admin2", &legacy));
+        assert!(!verify_web_password("x", "garbage"));
+    }
+
+    fn req(method: Method, headers: &[(header::HeaderName, &str)]) -> Request<Body> {
+        let mut r = Request::builder().method(method);
+        for (k, v) in headers {
+            r = r.header(k, *v);
+        }
+        r.body(Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn csrf_guard_blocks_foreign_and_non_json_writes() {
+        let json = (header::CONTENT_TYPE, "application/json");
+        let host = (header::HOST, "10.0.0.5");
+        assert!(same_origin_write(&req(Method::GET, &[])));
+        assert!(same_origin_write(&req(
+            Method::POST,
+            &[json.clone(), host.clone()]
+        )));
+        assert!(same_origin_write(&req(
+            Method::POST,
+            &[
+                json.clone(),
+                host.clone(),
+                (header::ORIGIN, "http://10.0.0.5")
+            ]
+        )));
+        assert!(!same_origin_write(&req(
+            Method::POST,
+            &[
+                json.clone(),
+                host.clone(),
+                (header::ORIGIN, "https://evil.example")
+            ]
+        )));
+        assert!(!same_origin_write(&req(
+            Method::POST,
+            &[(header::CONTENT_TYPE, "text/plain"), host]
+        )));
     }
 }

@@ -59,7 +59,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/contribution/status", get(contribution_status))
         .route("/metrics", get(metrics))
         .with_state(supervisor)
-        .merge(x19_api::routes());
+        .merge(x19_api::routes())
+        .layer(axum::middleware::from_fn(x19_api::guard));
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     info!(
